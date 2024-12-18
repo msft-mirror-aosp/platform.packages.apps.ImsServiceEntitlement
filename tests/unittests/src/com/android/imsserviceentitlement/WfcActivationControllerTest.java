@@ -22,8 +22,10 @@ import static com.android.imsserviceentitlement.ImsServiceEntitlementStatsLog.IM
 import static com.android.imsserviceentitlement.ImsServiceEntitlementStatsLog.IMS_SERVICE_ENTITLEMENT_UPDATED__SERVICE_TYPE__VOWIFI;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -33,6 +35,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
+import android.os.PersistableBundle;
+import android.telephony.CarrierConfigManager;
 import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 
@@ -40,9 +44,9 @@ import androidx.test.core.app.ApplicationProvider;
 import androidx.test.runner.AndroidJUnit4;
 
 import com.android.imsserviceentitlement.entitlement.EntitlementResult;
+import com.android.imsserviceentitlement.ts43.Ts43Constants.EntitlementStatus;
 import com.android.imsserviceentitlement.ts43.Ts43VowifiStatus;
 import com.android.imsserviceentitlement.ts43.Ts43VowifiStatus.AddrStatus;
-import com.android.imsserviceentitlement.ts43.Ts43VowifiStatus.EntitlementStatus;
 import com.android.imsserviceentitlement.ts43.Ts43VowifiStatus.ProvStatus;
 import com.android.imsserviceentitlement.ts43.Ts43VowifiStatus.TcStatus;
 import com.android.imsserviceentitlement.utils.Executors;
@@ -70,23 +74,30 @@ public class WfcActivationControllerTest {
     @Mock private NetworkInfo mMockNetworkInfo;
     @Mock private ImsUtils mMockImsUtils;
     @Mock private MetricsLogger mMockMetricsLogger;
+    @Mock private CarrierConfigManager mMockCarrierConfigManager;
 
     private static final int SUB_ID = 1;
     private static final int CARRIER_ID = 1234;
     private static final String EMERGENCY_ADDRESS_WEB_URL = "webUrl";
     private static final String EMERGENCY_ADDRESS_WEB_DATA = "webData";
+    private static final String KEY_SKIP_WFC_ACTIVATION_BOOL =
+            "imsserviceentitlement.skip_wfc_activation_bool";
 
     private WfcActivationController mWfcActivationController;
     private Context mContext;
+    private PersistableBundle mCarrierConfig;
 
     @Before
     public void setUp() throws Exception {
         mContext = spy(ApplicationProvider.getApplicationContext());
 
+        when(mContext.getSystemService(CarrierConfigManager.class))
+                .thenReturn(mMockCarrierConfigManager);
         when(mContext.getSystemService(TelephonyManager.class)).thenReturn(mMockTelephonyManager);
         when(mMockTelephonyManager.createForSubscriptionId(SUB_ID)).thenReturn(
                 mMockTelephonyManager);
         setNetworkConnected(true);
+        setIsSkipWfcActivation(false);
 
         Field field = Executors.class.getDeclaredField("sUseDirectExecutorForTest");
         field.setAccessible(true);
@@ -136,6 +147,68 @@ public class WfcActivationControllerTest {
     }
 
     @Test
+    public void finish_launchAppForActivateWithIsSkipWfcActivationTrue_notWriteMetrics() {
+        setIsSkipWfcActivation(true);
+        Intent startIntent = new Intent(Intent.ACTION_MAIN);
+        startIntent.putExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, SUB_ID);
+        startIntent.putExtra(
+                ActivityConstants.EXTRA_LAUNCH_CARRIER_APP, ActivityConstants.LAUNCH_APP_ACTIVATE);
+        mWfcActivationController =
+                new WfcActivationController(
+                        mContext,
+                        mMockActivationUi,
+                        mMockActivationApi,
+                        startIntent,
+                        mMockImsUtils,
+                        mMockMetricsLogger);
+
+        mWfcActivationController.finish();
+
+        verify(mMockMetricsLogger, never()).write(anyInt(), anyInt());
+    }
+
+    @Test
+    public void finish_launchAppForUpdateWithIsSkipWfcActivationTrue_writeMetrics() {
+        setIsSkipWfcActivation(true);
+        Intent startIntent = new Intent(Intent.ACTION_MAIN);
+        startIntent.putExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, SUB_ID);
+        startIntent.putExtra(
+                ActivityConstants.EXTRA_LAUNCH_CARRIER_APP, ActivityConstants.LAUNCH_APP_UPDATE);
+        mWfcActivationController =
+                new WfcActivationController(
+                        mContext,
+                        mMockActivationUi,
+                        mMockActivationApi,
+                        startIntent,
+                        mMockImsUtils,
+                        mMockMetricsLogger);
+
+        mWfcActivationController.finish();
+
+        verify(mMockMetricsLogger).write(anyInt(), anyInt());
+    }
+
+    @Test
+    public void finish_launchAppForUpdateAndIsSkipWfcActivationFalse_writeMetrics() {
+        Intent startIntent = new Intent(Intent.ACTION_MAIN);
+        startIntent.putExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, SUB_ID);
+        startIntent.putExtra(
+                ActivityConstants.EXTRA_LAUNCH_CARRIER_APP, ActivityConstants.LAUNCH_APP_UPDATE);
+        mWfcActivationController =
+                new WfcActivationController(
+                        mContext,
+                        mMockActivationUi,
+                        mMockActivationApi,
+                        startIntent,
+                        mMockImsUtils,
+                        mMockMetricsLogger);
+
+        mWfcActivationController.finish();
+
+        verify(mMockMetricsLogger).write(anyInt(), anyInt());
+    }
+
+    @Test
     public void finishFlow_isFinishing_showGeneralWaitingUi() {
         InOrder mOrderVerifier = inOrder(mMockActivationUi);
         when(mMockActivationApi.checkEntitlementStatus()).thenReturn(null);
@@ -165,18 +238,17 @@ public class WfcActivationControllerTest {
 
     @Test
     public void finishFlow_startForUpdate_showGeneralWaitingUi() {
-        when(mMockActivationApi.checkEntitlementStatus()).thenReturn(
-                EntitlementResult
-                        .builder()
-                        .setVowifiStatus(
-                                Ts43VowifiStatus
-                                        .builder()
-                                        .setEntitlementStatus(EntitlementStatus.ENABLED)
-                                        .setProvStatus(ProvStatus.PROVISIONED)
-                                        .setTcStatus(TcStatus.AVAILABLE)
-                                        .setAddrStatus(AddrStatus.AVAILABLE)
-                                        .build())
-                        .build());
+        when(mMockActivationApi.checkEntitlementStatus())
+                .thenReturn(
+                        EntitlementResult.builder(false)
+                                .setVowifiStatus(
+                                        Ts43VowifiStatus.builder()
+                                                .setEntitlementStatus(EntitlementStatus.ENABLED)
+                                                .setProvStatus(ProvStatus.PROVISIONED)
+                                                .setTcStatus(TcStatus.AVAILABLE)
+                                                .setAddrStatus(AddrStatus.AVAILABLE)
+                                                .build())
+                                .build());
         setNetworkConnected(false);
         Intent intent = new Intent(Intent.ACTION_MAIN);
         intent.putExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, SUB_ID);
@@ -230,18 +302,17 @@ public class WfcActivationControllerTest {
         intent.putExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, SUB_ID);
         intent.putExtra(ActivityConstants.EXTRA_LAUNCH_CARRIER_APP,
                 ActivityConstants.LAUNCH_APP_ACTIVATE);
-        when(mMockActivationApi.checkEntitlementStatus()).thenReturn(
-                EntitlementResult
-                        .builder()
-                        .setVowifiStatus(
-                                Ts43VowifiStatus
-                                        .builder()
-                                        .setEntitlementStatus(EntitlementStatus.ENABLED)
-                                        .setProvStatus(ProvStatus.PROVISIONED)
-                                        .setTcStatus(TcStatus.AVAILABLE)
-                                        .setAddrStatus(AddrStatus.AVAILABLE)
-                                        .build())
-                        .build());
+        when(mMockActivationApi.checkEntitlementStatus())
+                .thenReturn(
+                        EntitlementResult.builder(false)
+                                .setVowifiStatus(
+                                        Ts43VowifiStatus.builder()
+                                                .setEntitlementStatus(EntitlementStatus.ENABLED)
+                                                .setProvStatus(ProvStatus.PROVISIONED)
+                                                .setTcStatus(TcStatus.AVAILABLE)
+                                                .setAddrStatus(AddrStatus.AVAILABLE)
+                                                .build())
+                                .build());
         mWfcActivationController =
                 new WfcActivationController(
                         mContext,
@@ -263,7 +334,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusForActivation_isVowifiEntitledTrue_setActivityResultOk() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.ENABLED)
@@ -283,7 +354,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusForActivation_isServerDataMissingTrue_showWebview() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.DISABLED)
@@ -305,7 +376,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusForActivation_showTc_showWebview() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.DISABLED)
@@ -325,7 +396,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusForActivation_isIncompatibleTrue_showErrorUi() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.INCOMPATIBLE)
@@ -342,7 +413,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusForActivation_unexpectedStatus_showGeneralErrorUi() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.DISABLED)
@@ -361,7 +432,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusAfterActivation_isVowifiEntitledTrue_setActivityResultOk() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.ENABLED)
@@ -381,7 +452,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusAfterActivation_unexpectedStatus_showGeneralErrorUi() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.DISABLED)
@@ -400,7 +471,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusAfterUpdating_entitlementStatusEnabled_setResultOk() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.ENABLED)
@@ -420,7 +491,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusAfterUpdating_entitlementStatusNoServerData_turnOffWfc() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.DISABLED)
@@ -450,7 +521,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusAfterUpdating_unexpectedStatus_showGeneralErrorUi() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.DISABLED)
@@ -468,20 +539,19 @@ public class WfcActivationControllerTest {
 
     @Test
     public void handleEntitlementStatusForUpdate_serviceEntitled_showWebview() {
-        when(mMockActivationApi.checkEntitlementStatus()).thenReturn(
-                EntitlementResult
-                        .builder()
-                        .setVowifiStatus(
-                                Ts43VowifiStatus
-                                        .builder()
-                                        .setEntitlementStatus(EntitlementStatus.ENABLED)
-                                        .setProvStatus(ProvStatus.PROVISIONED)
-                                        .setTcStatus(TcStatus.AVAILABLE)
-                                        .setAddrStatus(AddrStatus.AVAILABLE)
-                                        .build())
-                        .setEmergencyAddressWebUrl(EMERGENCY_ADDRESS_WEB_URL)
-                        .setEmergencyAddressWebData(EMERGENCY_ADDRESS_WEB_DATA)
-                        .build());
+        when(mMockActivationApi.checkEntitlementStatus())
+                .thenReturn(
+                        EntitlementResult.builder(false)
+                                .setVowifiStatus(
+                                        Ts43VowifiStatus.builder()
+                                                .setEntitlementStatus(EntitlementStatus.ENABLED)
+                                                .setProvStatus(ProvStatus.PROVISIONED)
+                                                .setTcStatus(TcStatus.AVAILABLE)
+                                                .setAddrStatus(AddrStatus.AVAILABLE)
+                                                .build())
+                                .setEmergencyAddressWebUrl(EMERGENCY_ADDRESS_WEB_URL)
+                                .setEmergencyAddressWebData(EMERGENCY_ADDRESS_WEB_DATA)
+                                .build());
         buildActivity(ActivityConstants.LAUNCH_APP_UPDATE);
 
         mWfcActivationController.evaluateEntitlementStatus();
@@ -492,19 +562,18 @@ public class WfcActivationControllerTest {
 
     @Test
     public void handleEntitlementStatusForUpdate_showTc_showWebview() {
-        when(mMockActivationApi.checkEntitlementStatus()).thenReturn(
-                EntitlementResult
-                        .builder()
-                        .setVowifiStatus(
-                                Ts43VowifiStatus
-                                        .builder()
-                                        .setEntitlementStatus(EntitlementStatus.ENABLED)
-                                        .setProvStatus(ProvStatus.PROVISIONED)
-                                        .setTcStatus(TcStatus.AVAILABLE)
-                                        .setAddrStatus(AddrStatus.AVAILABLE)
-                                        .build())
-                        .setTermsAndConditionsWebUrl(EMERGENCY_ADDRESS_WEB_URL)
-                        .build());
+        when(mMockActivationApi.checkEntitlementStatus())
+                .thenReturn(
+                        EntitlementResult.builder(false)
+                                .setVowifiStatus(
+                                        Ts43VowifiStatus.builder()
+                                                .setEntitlementStatus(EntitlementStatus.ENABLED)
+                                                .setProvStatus(ProvStatus.PROVISIONED)
+                                                .setTcStatus(TcStatus.AVAILABLE)
+                                                .setAddrStatus(AddrStatus.AVAILABLE)
+                                                .build())
+                                .setTermsAndConditionsWebUrl(EMERGENCY_ADDRESS_WEB_URL)
+                                .build());
         buildActivity(ActivityConstants.LAUNCH_APP_SHOW_TC);
 
         mWfcActivationController.evaluateEntitlementStatus();
@@ -515,7 +584,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusForUpdate_entitlementStatusIncompatible_showErrorUi() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.INCOMPATIBLE)
@@ -532,7 +601,7 @@ public class WfcActivationControllerTest {
     @Test
     public void handleEntitlementStatusForUpdate_entitlementStatusDisabled_showGenericErrorUi() {
         EntitlementResult entitlementResult =
-                EntitlementResult.builder()
+                EntitlementResult.builder(false)
                         .setVowifiStatus(
                                 Ts43VowifiStatus.builder()
                                         .setEntitlementStatus(EntitlementStatus.DISABLED)
@@ -586,5 +655,17 @@ public class WfcActivationControllerTest {
     private void verifyGeneralWaitingUiInOrder(InOrder inOrder, int title) {
         inOrder.verify(mMockActivationUi)
                 .showActivationUi(title, R.string.progress_text, true, 0, 0, 0);
+    }
+
+    private void setIsSkipWfcActivation(boolean isSkip) {
+        initializeCarrierConfig();
+        mCarrierConfig.putBoolean(KEY_SKIP_WFC_ACTIVATION_BOOL, isSkip);
+    }
+
+    private void initializeCarrierConfig() {
+        if (mCarrierConfig == null) {
+            mCarrierConfig = new PersistableBundle();
+            when(mMockCarrierConfigManager.getConfigForSubId(SUB_ID)).thenReturn(mCarrierConfig);
+        }
     }
 }
